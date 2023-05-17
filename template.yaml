@@ -1,0 +1,114 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+
+  SAM Template for myapp
+
+Globals:
+  Function:
+    Timeout: 3
+    MemorySize: 128
+
+Parameters:
+    DeployStage:
+      Type: String
+      Default: "dev"    # Deployment stage name to use in API Gateway  
+    SecretToken:
+      Type: String
+      Default: "myapptoken" # Token name to use for authorization
+
+Resources:
+  # Create a secret token in Secrets Manager. 
+  MyApiTokenSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: "MyAppApiToken"
+      SecretString: !Ref SecretToken
+  
+  # This creates the API gateway resources to access the lambda function. Note that we are also creating
+  # an authorizer which will get attached to the resources in the API gateway
+  MyAppAPI:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref DeployStage
+      Auth:
+        DefaultAuthorizer: LambdaTokenAuthorizer
+        Authorizers:
+          LambdaTokenAuthorizer:
+            FunctionArn: !GetAtt MyAppAuthFunction.Arn
+            Identity:
+              Header: authorizationToken
+
+  # The lambda function which hosts myapp. Note the different attributes in this section. 
+  # SAM will use these inputs and build the docker image accordingly and upload the same 
+  # in ECR.           
+  MyAppFunction:
+    Type: AWS::Serverless::Function 
+    Metadata:
+      Dockerfile: Dockerfile
+      DockerContext: .
+      DockerTag: latest  
+    Properties:
+      FunctionUrlConfig:       # We are also creating a function URL in lambda just for testing purpose.
+        AuthType: NONE
+      PackageType: Image
+      ImageConfig:
+        Command: ["myapp.main.handler"]
+      Architectures:
+      - x86_64
+      Events:     # The events section will make sure to create the respective method and resource in the API gateway
+        default:  # Note that we are creating a {proxy+} resource so that all type of requests can be served.
+          Type: Api
+          Properties:
+            RestApiId: !Ref MyAppAPI
+            Path: /
+            Method: ANY
+            Auth:
+              DefaultAuthorizer: MyAppAuthorizer
+              Authorizers:
+                MyAppAuthorizer:
+                  FunctionArn: !GetAtt MyAppAuthFunction.Arn         
+        proxy:
+          Type: Api
+          Properties:
+            RestApiId: !Ref MyAppAPI
+            Path: /{proxy+}
+            Method: ANY
+            Auth:
+              DefaultAuthorizer: MyAppAuthorizer
+              Authorizers:
+                MyAppAuthorizer:
+                  FunctionArn: !GetAtt MyAppAuthFunction.Arn
+  
+  # The lambda function used for validating the token before API gateway calls the main lambda function                
+  MyAppAuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./authorizer
+      Handler: index.handler
+      Runtime: nodejs18.x
+      Environment:
+        Variables:
+          SECRET_ID: "MyAppApiToken"
+      Policies:
+      - Statement:
+        - Sid: CreateLogGroup
+          Effect: Allow
+          Action:
+          - logs:CreateLogStream
+          - logs:PutLogEvents
+          Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+        - Sid: AllowSecretsAccess
+          Effect: Allow
+          Action:
+          - secretsmanager:GetSecretValue
+          Resource: !Ref MyApiTokenSecret
+Outputs:
+  MyAppAPI:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${MyAppAPI}.execute-api.${AWS::Region}.amazonaws.com/${DeployStage}/"
+  MyAppFunctionUrlEndpoint:
+      Description: "Functional docs URL(for internal use only)"
+      Value: !Join ["", [ Fn::GetAtt: MyAppFunctionUrl.FunctionUrl, "docs" ] ]         
+  
+  
